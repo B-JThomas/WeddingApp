@@ -19,6 +19,7 @@ type Song = {
 
 type SpotifySession = { accessToken: string; refreshToken?: string; expiresAt: number };
 type SpotifyPlayer = { connect: () => Promise<boolean>; disconnect: () => void; togglePlay: () => Promise<void>; addListener: (event: string, callback: (payload: { device_id?: string; message?: string }) => void) => boolean };
+type SharedState = { songs: Song[]; votes: VoteBook };
 
 declare global {
   interface Window {
@@ -124,11 +125,53 @@ export default function Home() {
   const [playlistName, setPlaylistName] = useState("Wedding favourites");
   const [spotify, setSpotify] = useState<SpotifySession | null>(loadSpotifySession);
   const [deviceId, setDeviceId] = useState("");
+  const [syncStatus, setSyncStatus] = useState<"connecting" | "shared" | "offline">("connecting");
   const playerRef = useRef<SpotifyPlayer | null>(null);
+  const syncInFlight = useRef(false);
+  const initialSharedState = useRef<SharedState>({ songs: savedState.songs?.length ? savedState.songs : initialSongs, votes: savedState.votes ?? {} });
+
+  const applySharedState = useCallback((shared: SharedState) => {
+    setSongs((localSongs) => shared.songs.map((song) => ({ ...song, spotify: localSongs.find((local) => local.id === song.id)?.spotify ?? song.spotify })));
+    setVotes(shared.votes ?? {});
+  }, []);
+
+  const updateSharedState = useCallback(async (action: Record<string, unknown>) => {
+    syncInFlight.current = true;
+    setSyncStatus("connecting");
+    try {
+      const response = await fetch("/.netlify/functions/shared-state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
+      const data = await response.json() as { state?: SharedState; error?: string };
+      if (!response.ok || !data.state) throw new Error(data.error ?? "Couldn’t save the shared review");
+      applySharedState(data.state);
+      setSyncStatus("shared");
+    } catch {
+      setSyncStatus("offline");
+      setNotice("Your change is saved on this device, but couldn’t reach the shared review yet.");
+    } finally {
+      syncInFlight.current = false;
+    }
+  }, [applySharedState]);
 
   useEffect(() => {
     window.localStorage.setItem(storageKey, JSON.stringify({ songs, votes, person }));
   }, [songs, votes, person]);
+
+  useEffect(() => {
+    void updateSharedState({ type: "initialise", state: initialSharedState.current });
+  }, [updateSharedState]);
+
+  useEffect(() => {
+    const refresh = async () => {
+      if (syncInFlight.current) return;
+      try {
+        const response = await fetch("/.netlify/functions/shared-state", { cache: "no-store" });
+        const data = await response.json() as { state?: SharedState };
+        if (response.ok && data.state) { applySharedState(data.state); setSyncStatus("shared"); }
+      } catch { setSyncStatus("offline"); }
+    };
+    const interval = window.setInterval(() => { void refresh(); }, 5000);
+    return () => window.clearInterval(interval);
+  }, [applySharedState]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -254,6 +297,7 @@ export default function Home() {
     if (!currentSong) return;
     const updated = { ...votes, [currentSong.id]: { ...votes[currentSong.id], [person]: value } };
     setVotes(updated);
+    void updateSharedState({ type: "vote", songId: currentSong.id, person, value });
     const position = songs.findIndex((song) => song.id === currentSong.id);
     const next = songs.slice(position + 1).find((song) => !updated[song.id]?.[person]) ?? songs.find((song) => !updated[song.id]?.[person]);
     if (next) { setCurrentId(next.id); void playSong(next); }
@@ -276,6 +320,7 @@ export default function Home() {
         return existing ? { ...song, id: existing.id, spotify: existing.spotify, status: existing.spotify ? "Matched" as const : song.status } : song;
       });
       setSongs(merged);
+      void updateSharedState({ type: "setlist", songs: merged });
       setCurrentId(merged.find((song) => !votes[song.id]?.[person])?.id ?? merged[0].id);
       setNotice(`${merged.length} songs are ready. Previous choices remain attached to songs still on this setlist.`);
       setScreen("review");
@@ -320,6 +365,7 @@ export default function Home() {
           <button className={screen === "review" ? "nav-active" : ""} onClick={() => setScreen("review")}>Review</button>
           <button className={screen === "results" ? "nav-active" : ""} onClick={() => setScreen("results")}>Shortlist <span>{resultGroups["Both yes"]?.length ?? 0}</span></button>
         </nav>
+        <span className={`sync-status ${syncStatus}`} title={syncStatus === "shared" ? "Changes are shared between devices" : "Trying to connect to the shared review"}>{syncStatus === "shared" ? "Shared live" : syncStatus === "offline" ? "Saving locally" : "Connecting…"}</span>
         <button className={`spotify-button ${spotify ? "spotify-connected" : ""}`} onClick={() => void connectSpotify()}>{spotify ? "Spotify connected" : "Connect Spotify"}</button>
         <label className="person-switch">Reviewing as
           <select value={person} onChange={(event) => switchPerson(event.target.value as Person)}>
