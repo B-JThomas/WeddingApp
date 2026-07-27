@@ -17,7 +17,7 @@ type Song = {
   spotify?: { uri: string; title: string; artist: string; album: string; imageUrl?: string };
 };
 
-type SpotifySession = { accessToken: string; expiresAt: number };
+type SpotifySession = { accessToken: string; refreshToken?: string; expiresAt: number };
 type SpotifyPlayer = { connect: () => Promise<boolean>; disconnect: () => void; togglePlay: () => Promise<void>; addListener: (event: string, callback: (payload: { device_id?: string; message?: string }) => void) => boolean };
 
 declare global {
@@ -71,6 +71,8 @@ async function codeChallenge(verifier: string) {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
   return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+
+function redirectUri() { return `${window.location.origin}/`; }
 
 function classify(song: Song, votes: VoteBook) {
   const pair = votes[song.id] ?? {};
@@ -129,11 +131,10 @@ export default function Home() {
     const verifier = sessionStorage.getItem("spotify-verifier");
     if (!code || !verifier || state !== sessionStorage.getItem("spotify-state")) return;
     void (async () => {
-      const body = new URLSearchParams({ client_id: spotifyClientId, grant_type: "authorization_code", code, redirect_uri: window.location.origin, code_verifier: verifier });
-      const response = await fetch("https://accounts.spotify.com/api/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+      const response = await fetch("/api/spotify/token", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, codeVerifier: verifier, redirectUri: redirectUri() }) });
       if (!response.ok) { setNotice("Spotify couldn’t finish connecting. Check the redirect address in your Spotify app settings."); return; }
-      const data = await response.json() as { access_token: string; expires_in: number };
-      const session = { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+      const data = await response.json() as { access_token: string; refresh_token?: string; expires_in: number };
+      const session = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + data.expires_in * 1000 };
       sessionStorage.setItem(spotifyStorageKey, JSON.stringify(session));
       setSpotify(session);
       sessionStorage.removeItem("spotify-verifier"); sessionStorage.removeItem("spotify-state");
@@ -223,7 +224,7 @@ export default function Home() {
     const challenge = await codeChallenge(verifier);
     sessionStorage.setItem("spotify-verifier", verifier);
     sessionStorage.setItem("spotify-state", state);
-    const params = new URLSearchParams({ client_id: spotifyClientId, response_type: "code", redirect_uri: window.location.origin, code_challenge_method: "S256", code_challenge: challenge, state, scope: "streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state" });
+    const params = new URLSearchParams({ client_id: spotifyClientId, response_type: "code", redirect_uri: redirectUri(), code_challenge_method: "S256", code_challenge: challenge, state, scope: "streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state" });
     window.location.assign(`https://accounts.spotify.com/authorize?${params}`);
   }
 
