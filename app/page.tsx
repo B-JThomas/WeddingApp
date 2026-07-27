@@ -3,7 +3,7 @@
 
 import { ChangeEvent, CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Person = "Alex" | "Jamie";
+type Person = "Bailey" | "Chloe";
 type VoteValue = "yes" | "no";
 type VoteBook = Record<string, Partial<Record<Person, VoteValue>>>;
 
@@ -36,7 +36,7 @@ const initialSongs: Song[] = [
   { id: "sun", artist: "The Paper Kites", title: "Bloom", album: "Woodland", status: "Matched", colour: "#76946e" },
 ];
 
-const people: Person[] = ["Alex", "Jamie"];
+const people: Person[] = ["Bailey", "Chloe"];
 const storageKey = "last-dance-review-demo";
 const spotifyStorageKey = "last-dance-spotify";
 const spotifyClientId = "ce0d964b25884286b8df44eb06b66d1a";
@@ -44,7 +44,10 @@ const spotifyClientId = "ce0d964b25884286b8df44eb06b66d1a";
 function loadSavedState(): { songs?: Song[]; votes?: VoteBook; person?: Person } {
   if (typeof window === "undefined") return {};
   try {
-    return JSON.parse(window.localStorage.getItem(storageKey) ?? "{}") as { songs?: Song[]; votes?: VoteBook; person?: Person };
+    const saved = JSON.parse(window.localStorage.getItem(storageKey) ?? "{}") as { songs?: Song[]; votes?: VoteBook; person?: Person | "Alex" | "Jamie" };
+    const oldVotes = saved.votes as VoteBook & Record<string, { Alex?: VoteValue; Jamie?: VoteValue }> | undefined;
+    const votes = oldVotes ? Object.fromEntries(Object.entries(oldVotes).map(([id, vote]) => [id, { Bailey: vote.Bailey ?? vote.Alex, Chloe: vote.Chloe ?? vote.Jamie }])) as VoteBook : undefined;
+    return { ...saved, person: saved.person === "Alex" ? "Bailey" : saved.person === "Jamie" ? "Chloe" : saved.person, votes } as { songs?: Song[]; votes?: VoteBook; person?: Person };
   } catch {
     return {};
   }
@@ -76,9 +79,9 @@ function redirectUri() { return `${window.location.origin}/`; }
 
 function classify(song: Song, votes: VoteBook) {
   const pair = votes[song.id] ?? {};
-  if (pair.Alex === "yes" && pair.Jamie === "yes") return "Both yes";
-  if (pair.Alex && pair.Jamie && pair.Alex === "no" && pair.Jamie === "no") return "Both no";
-  if (pair.Alex && pair.Jamie) return "Different picks";
+  if (pair.Bailey === "yes" && pair.Chloe === "yes") return "Both yes";
+  if (pair.Bailey && pair.Chloe && pair.Bailey === "no" && pair.Chloe === "no") return "Both no";
+  if (pair.Bailey && pair.Chloe) return "Different picks";
   return "Awaiting vote";
 }
 
@@ -98,7 +101,7 @@ function parseSongs(text: string): Song[] {
     const key = slug(`${artist}-${title}`);
     if (!artist || !title || seen.has(key)) return [];
     seen.add(key);
-    return [{ id: `${key}-${index}`, artist, title, album: "Your imported setlist", status: "Needs review" as const, colour: ["#9c7860", "#6f8fa0", "#a66c7d", "#78936d"][index % 4] }];
+    return [{ id: key, artist, title, album: "Your imported setlist", status: "Needs review" as const, colour: ["#9c7860", "#6f8fa0", "#a66c7d", "#78936d"][index % 4] }];
   });
 }
 
@@ -106,16 +109,17 @@ export default function Home() {
   const [savedState] = useState(loadSavedState);
   const [songs, setSongs] = useState<Song[]>(savedState.songs?.length ? savedState.songs : initialSongs);
   const [votes, setVotes] = useState<VoteBook>(savedState.votes ?? {});
-  const [person, setPerson] = useState<Person>(savedState.person ?? "Alex");
+  const [person, setPerson] = useState<Person>(savedState.person ?? "Bailey");
   const [screen, setScreen] = useState<"review" | "results">("review");
   const [currentId, setCurrentId] = useState(() => {
     const restoredSongs = savedState.songs?.length ? savedState.songs : initialSongs;
-    const restoredPerson = savedState.person ?? "Alex";
+    const restoredPerson = savedState.person ?? "Bailey";
     return restoredSongs.find((song) => !savedState.votes?.[song.id]?.[restoredPerson])?.id ?? restoredSongs[0].id;
   });
   const [isPlaying, setIsPlaying] = useState(false);
   const [notice, setNotice] = useState("");
   const [filter, setFilter] = useState("All songs");
+  const [playlistName, setPlaylistName] = useState("Wedding favourites");
   const [spotify, setSpotify] = useState<SpotifySession | null>(loadSpotifySession);
   const [deviceId, setDeviceId] = useState("");
   const playerRef = useRef<SpotifyPlayer | null>(null);
@@ -224,30 +228,33 @@ export default function Home() {
     const challenge = await codeChallenge(verifier);
     sessionStorage.setItem("spotify-verifier", verifier);
     sessionStorage.setItem("spotify-state", state);
-    const params = new URLSearchParams({ client_id: spotifyClientId, response_type: "code", redirect_uri: redirectUri(), code_challenge_method: "S256", code_challenge: challenge, state, scope: "streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state" });
+    const params = new URLSearchParams({ client_id: spotifyClientId, response_type: "code", redirect_uri: redirectUri(), code_challenge_method: "S256", code_challenge: challenge, state, scope: "streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state playlist-modify-private" });
     window.location.assign(`https://accounts.spotify.com/authorize?${params}`);
   }
 
-  async function playOrPause() {
+  async function playSong(song: Song) {
     if (!spotify) { await connectSpotify(); return; }
-    if (isPlaying) { await playerRef.current?.togglePlay(); setIsPlaying(false); return; }
     if (!deviceId) { setNotice("Spotify is connecting to this browser. Give it a moment, then press play again."); return; }
-    const match = await matchSong(currentSong);
+    const match = await matchSong(song);
     if (!match) { setNotice("We couldn’t find this version on Spotify. Try Open in Spotify instead."); return; }
     const response = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, { method: "PUT", headers: { Authorization: `Bearer ${spotify.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ uris: [match.uri] }) });
     if (!response.ok) { setNotice("Spotify couldn’t start this song. Try reconnecting Spotify or Open in Spotify."); return; }
     setIsPlaying(true);
   }
 
+  async function playOrPause() {
+    if (isPlaying) { await playerRef.current?.togglePlay(); setIsPlaying(false); return; }
+    await playSong(currentSong);
+  }
+
   function vote(value: VoteValue) {
     if (!currentSong) return;
     const updated = { ...votes, [currentSong.id]: { ...votes[currentSong.id], [person]: value } };
     setVotes(updated);
-    setIsPlaying(false);
     const position = songs.findIndex((song) => song.id === currentSong.id);
     const next = songs.slice(position + 1).find((song) => !updated[song.id]?.[person]) ?? songs.find((song) => !updated[song.id]?.[person]);
-    if (next) setCurrentId(next.id);
-    else setNotice("That’s your whole list — lovely work. Your choices are saved.");
+    if (next) { setCurrentId(next.id); void playSong(next); }
+    else { setIsPlaying(false); setNotice("That’s your whole list — lovely work. Your choices are saved."); }
   }
 
   function handleImport(event: ChangeEvent<HTMLInputElement>) {
@@ -260,22 +267,42 @@ export default function Home() {
         setNotice("We couldn’t find artist and title columns. Try headers like Artist, Title.");
         return;
       }
-      setSongs(imported);
-      setVotes({});
-      setCurrentId(imported[0].id);
-      setNotice(`${imported.length} songs are ready to review. We removed blank rows and duplicates.`);
+      const existingBySource = new Map(songs.map((song) => [slug(`${song.artist}-${song.title}`), song]));
+      const merged = imported.map((song) => {
+        const existing = existingBySource.get(slug(`${song.artist}-${song.title}`));
+        return existing ? { ...song, id: existing.id, spotify: existing.spotify, status: existing.spotify ? "Matched" as const : song.status } : song;
+      });
+      setSongs(merged);
+      setCurrentId(merged.find((song) => !votes[song.id]?.[person])?.id ?? merged[0].id);
+      setNotice(`${merged.length} songs are ready. Previous choices remain attached to songs still on this setlist.`);
       setScreen("review");
     };
     reader.readAsText(file);
   }
 
   function exportResults() {
-    const rows = ["Artist,Song,Alex,Jamie,Outcome", ...songs.map((song) => [song.artist, song.title, votes[song.id]?.Alex ?? "", votes[song.id]?.Jamie ?? "", classify(song, votes)].map((item) => `"${item}"`).join(","))];
+    const rows = ["Artist,Song,Bailey,Chloe,Outcome", ...songs.map((song) => [song.artist, song.title, votes[song.id]?.Bailey ?? "", votes[song.id]?.Chloe ?? "", classify(song, votes)].map((item) => `"${item}"`).join(","))];
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([rows.join("\n")], { type: "text/csv" }));
     link.download = "wedding-shortlist.csv";
     link.click();
     URL.revokeObjectURL(link.href);
+  }
+
+  async function createPlaylist() {
+    if (!spotify) { await connectSpotify(); return; }
+    const agreed = songs.filter((song) => classify(song, votes) === "Both yes");
+    if (!agreed.length) { setNotice("Choose a few songs together before creating a playlist."); return; }
+    const matches = await Promise.all(agreed.map((song) => matchSong(song)));
+    const uris = matches.flatMap((match) => match?.uri ? [match.uri] : []);
+    if (!uris.length) { setNotice("We couldn’t match your agreed songs to Spotify yet. Try playing them first, then create the playlist."); return; }
+    const playlistResponse = await fetch("https://api.spotify.com/v1/me/playlists", { method: "POST", headers: { Authorization: `Bearer ${spotify.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ name: playlistName.trim() || "Wedding favourites", public: false, description: "Created with Last Dance" }) });
+    if (!playlistResponse.ok) { setNotice("Spotify needs permission to create a private playlist. Press Connect Spotify once more, approve the new permission, then try again."); return; }
+    const playlist = await playlistResponse.json() as { id: string; external_urls?: { spotify?: string } };
+    const tracksResponse = await fetch(`https://api.spotify.com/v1/playlists/${playlist.id}/tracks`, { method: "POST", headers: { Authorization: `Bearer ${spotify.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ uris }) });
+    if (!tracksResponse.ok) { setNotice("The playlist was created, but Spotify couldn’t add every song."); return; }
+    setNotice(`Your playlist is ready: ${playlistName.trim() || "Wedding favourites"}.`);
+    if (playlist.external_urls?.spotify) window.open(playlist.external_urls.spotify, "_blank", "noopener,noreferrer");
   }
 
   if (!currentSong) return null;
@@ -334,10 +361,12 @@ export default function Home() {
       ) : (
         <section className="results-page">
           <div className="results-heading"><div><p className="eyebrow">WEDDING SETLIST</p><h1>Your shared <em>shortlist.</em></h1><p>{resultGroups["Both yes"]?.length ?? 0} songs you both chose. Keep the little sparks.</p></div><button className="export-button" onClick={exportResults}>Export CSV ↓</button></div>
+          <div className="playlist-creator"><div><strong>Create your private Spotify playlist</strong><span>Only songs both Bailey and Chloe chose Yes will be added.</span></div><input value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} aria-label="Playlist name" placeholder="Wedding favourites" /><button onClick={() => void createPlaylist()}>Create playlist</button></div>
           <div className="filter-row">{["All songs", "Both yes", "Different picks", "Both no", "Awaiting vote"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item} <span>{item === "All songs" ? songs.length : resultGroups[item]?.length ?? 0}</span></button>)}</div>
-          <div className="results-list">{songs.filter((song) => filter === "All songs" || classify(song, votes) === filter).map((song) => <article className="result-row" key={song.id}>{song.spotify?.imageUrl ? <img className="mini-art cover" src={song.spotify.imageUrl} alt="" /> : <div className="mini-art" style={{ background: song.colour }}>{song.title.slice(0, 1)}</div>}<div className="result-song"><strong>{song.spotify?.title ?? song.title}</strong><span>{song.spotify?.artist ?? song.artist}</span></div><div className="vote-state"><span>Alex <b className={votes[song.id]?.Alex}>{votes[song.id]?.Alex ?? "—"}</b></span><span>Jamie <b className={votes[song.id]?.Jamie}>{votes[song.id]?.Jamie ?? "—"}</b></span></div><span className={`outcome ${slug(classify(song, votes))}`}>{classify(song, votes)}</span><button className="edit-button" onClick={() => { setCurrentId(song.id); setScreen("review"); }}>Review</button></article>)}</div>
+          <div className="results-list">{songs.filter((song) => filter === "All songs" || classify(song, votes) === filter).map((song) => <article className="result-row" key={song.id}>{song.spotify?.imageUrl ? <img className="mini-art cover" src={song.spotify.imageUrl} alt="" /> : <div className="mini-art" style={{ background: song.colour }}>{song.title.slice(0, 1)}</div>}<div className="result-song"><strong>{song.spotify?.title ?? song.title}</strong><span>{song.spotify?.artist ?? song.artist}</span></div><div className="vote-state"><span>Bailey <b className={votes[song.id]?.Bailey}>{votes[song.id]?.Bailey ?? "—"}</b></span><span>Chloe <b className={votes[song.id]?.Chloe}>{votes[song.id]?.Chloe ?? "—"}</b></span></div><span className={`outcome ${slug(classify(song, votes))}`}>{classify(song, votes)}</span><button className="edit-button" onClick={() => { setCurrentId(song.id); setScreen("review"); }}>Review</button></article>)}</div>
         </section>
       )}
+      <aside className="global-player" aria-label="Spotify player"><button className="round-button" onClick={() => void playOrPause()} aria-label={!spotify ? "Connect Spotify" : isPlaying ? "Pause song" : "Play song"}>{isPlaying ? "Ⅱ" : "▶"}</button><div><strong>{currentSong.spotify?.title ?? currentSong.title}</strong><span>{isPlaying ? "Playing now" : spotify ? "Paused" : "Connect Spotify to play"}</span></div><button className="global-player-open" onClick={() => setScreen("review")}>Open review</button></aside>
     </main>
   );
 }
