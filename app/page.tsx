@@ -135,7 +135,8 @@ export default function Home() {
     const verifier = sessionStorage.getItem("spotify-verifier");
     if (!code || !verifier || state !== sessionStorage.getItem("spotify-state")) return;
     void (async () => {
-      const response = await fetch("/api/spotify/token", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, codeVerifier: verifier, redirectUri: redirectUri() }) });
+      const body = new URLSearchParams({ client_id: spotifyClientId, grant_type: "authorization_code", code, redirect_uri: redirectUri(), code_verifier: verifier });
+      const response = await fetch("https://accounts.spotify.com/api/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
       if (!response.ok) { setNotice("Spotify couldn’t finish connecting. Check the redirect address in your Spotify app settings."); return; }
       const data = await response.json() as { access_token: string; refresh_token?: string; expires_in: number };
       const session = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + data.expires_in * 1000 };
