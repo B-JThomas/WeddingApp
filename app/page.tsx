@@ -75,7 +75,9 @@ async function codeChallenge(verifier: string) {
   return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function redirectUri() { return `${window.location.origin}/`; }
+// Spotify requires an exact redirect-URI match. Keep this without a trailing
+// slash to match the URI already configured in the Spotify dashboard.
+function redirectUri() { return window.location.origin; }
 
 function classify(song: Song, votes: VoteBook) {
   const pair = votes[song.id] ?? {};
@@ -300,8 +302,8 @@ export default function Home() {
     const playlistResponse = await fetch("https://api.spotify.com/v1/me/playlists", { method: "POST", headers: { Authorization: `Bearer ${spotify.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ name: playlistName.trim() || "Wedding favourites", public: false, description: "Created with Last Dance" }) });
     if (!playlistResponse.ok) { setNotice("Spotify needs permission to create a private playlist. Press Connect Spotify once more, approve the new permission, then try again."); return; }
     const playlist = await playlistResponse.json() as { id: string; external_urls?: { spotify?: string } };
-    const tracksResponse = await fetch(`https://api.spotify.com/v1/playlists/${playlist.id}/tracks`, { method: "POST", headers: { Authorization: `Bearer ${spotify.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ uris }) });
-    if (!tracksResponse.ok) { setNotice("The playlist was created, but Spotify couldn’t add every song."); return; }
+    const tracksResponse = await fetch(`https://api.spotify.com/v1/playlists/${playlist.id}/items`, { method: "POST", headers: { Authorization: `Bearer ${spotify.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ uris }) });
+    if (!tracksResponse.ok) { setNotice("The playlist was created, but Spotify couldn’t add the songs. Please reconnect Spotify and try again."); return; }
     setNotice(`Your playlist is ready: ${playlistName.trim() || "Wedding favourites"}.`);
     if (playlist.external_urls?.spotify) window.open(playlist.external_urls.spotify, "_blank", "noopener,noreferrer");
   }
