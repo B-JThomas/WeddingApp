@@ -1,6 +1,7 @@
 "use client";
+/* eslint-disable @next/next/no-img-element */
 
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Person = "Alex" | "Jamie";
 type VoteValue = "yes" | "no";
@@ -13,7 +14,18 @@ type Song = {
   album: string;
   status: "Matched" | "Needs review" | "Unmatched";
   colour: string;
+  spotify?: { uri: string; title: string; artist: string; album: string; imageUrl?: string };
 };
+
+type SpotifySession = { accessToken: string; expiresAt: number };
+type SpotifyPlayer = { connect: () => Promise<boolean>; disconnect: () => void; togglePlay: () => Promise<void>; addListener: (event: string, callback: (payload: { device_id?: string; message?: string }) => void) => boolean };
+
+declare global {
+  interface Window {
+    Spotify?: { Player: new (options: { name: string; getOAuthToken: (callback: (token: string) => void) => void; volume: number }) => SpotifyPlayer };
+    onSpotifyWebPlaybackSDKReady?: () => void;
+  }
+}
 
 const initialSongs: Song[] = [
   { id: "dreams", artist: "Fleetwood Mac", title: "Dreams", album: "Rumours", status: "Matched", colour: "#c87952" },
@@ -26,6 +38,8 @@ const initialSongs: Song[] = [
 
 const people: Person[] = ["Alex", "Jamie"];
 const storageKey = "last-dance-review-demo";
+const spotifyStorageKey = "last-dance-spotify";
+const spotifyClientId = "ce0d964b25884286b8df44eb06b66d1a";
 
 function loadSavedState(): { songs?: Song[]; votes?: VoteBook; person?: Person } {
   if (typeof window === "undefined") return {};
@@ -36,8 +50,26 @@ function loadSavedState(): { songs?: Song[]; votes?: VoteBook; person?: Person }
   }
 }
 
+function loadSpotifySession(): SpotifySession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const session = JSON.parse(sessionStorage.getItem(spotifyStorageKey) ?? "null") as SpotifySession | null;
+    return session?.expiresAt && session.expiresAt > Date.now() ? session : null;
+  } catch { return null; }
+}
+
 function slug(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+}
+
+function randomString(length: number) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  return Array.from(crypto.getRandomValues(new Uint8Array(length)), (byte) => alphabet[byte % alphabet.length]).join("");
+}
+
+async function codeChallenge(verifier: string) {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function classify(song: Song, votes: VoteBook) {
@@ -82,10 +114,57 @@ export default function Home() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [notice, setNotice] = useState("");
   const [filter, setFilter] = useState("All songs");
+  const [spotify, setSpotify] = useState<SpotifySession | null>(loadSpotifySession);
+  const [deviceId, setDeviceId] = useState("");
+  const playerRef = useRef<SpotifyPlayer | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(storageKey, JSON.stringify({ songs, votes, person }));
   }, [songs, votes, person]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const state = params.get("state");
+    const verifier = sessionStorage.getItem("spotify-verifier");
+    if (!code || !verifier || state !== sessionStorage.getItem("spotify-state")) return;
+    void (async () => {
+      const body = new URLSearchParams({ client_id: spotifyClientId, grant_type: "authorization_code", code, redirect_uri: window.location.origin, code_verifier: verifier });
+      const response = await fetch("https://accounts.spotify.com/api/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+      if (!response.ok) { setNotice("Spotify couldn’t finish connecting. Check the redirect address in your Spotify app settings."); return; }
+      const data = await response.json() as { access_token: string; expires_in: number };
+      const session = { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+      sessionStorage.setItem(spotifyStorageKey, JSON.stringify(session));
+      setSpotify(session);
+      sessionStorage.removeItem("spotify-verifier"); sessionStorage.removeItem("spotify-state");
+      window.history.replaceState({}, "", window.location.pathname);
+      setNotice("Spotify is connected — finding the right track and album cover now.");
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!spotify) return;
+    const initialise = () => {
+      if (!window.Spotify || playerRef.current) return;
+      const player = new window.Spotify.Player({ name: "Last Dance", getOAuthToken: (callback) => callback(spotify.accessToken), volume: 0.65 });
+      player.addListener("ready", ({ device_id }) => setDeviceId(device_id ?? ""));
+      player.addListener("not_ready", () => setDeviceId(""));
+      player.addListener("authentication_error", ({ message }) => setNotice(message ?? "Spotify needs you to sign in again."));
+      player.addListener("account_error", ({ message }) => setNotice(message ?? "Spotify Premium is needed for browser playback."));
+      player.addListener("playback_error", ({ message }) => setNotice(message ?? "Spotify couldn’t play this track."));
+      void player.connect();
+      playerRef.current = player;
+    };
+    if (window.Spotify) initialise();
+    else {
+      const script = document.createElement("script");
+      script.src = "https://sdk.scdn.co/spotify-player.js";
+      script.async = true;
+      window.onSpotifyWebPlaybackSDKReady = initialise;
+      document.body.appendChild(script);
+    }
+    return () => { playerRef.current?.disconnect(); playerRef.current = null; setDeviceId(""); };
+  }, [spotify]);
 
   const currentSong = songs.find((song) => song.id === currentId) ?? songs[0];
   const reviewed = songs.filter((song) => votes[song.id]?.[person]).length;
@@ -97,10 +176,29 @@ export default function Home() {
     }, {});
   }, [songs, votes]);
 
+  const matchSong = useCallback(async (song: Song) => {
+    if (!spotify || song.spotify) return song.spotify;
+    const query = encodeURIComponent(`track:${song.title} artist:${song.artist}`);
+    const response = await fetch(`https://api.spotify.com/v1/search?type=track&limit=1&q=${query}`, { headers: { Authorization: `Bearer ${spotify.accessToken}` } });
+    if (!response.ok) return undefined;
+    const data = await response.json() as { tracks?: { items?: Array<{ uri: string; name: string; artists: Array<{ name: string }>; album: { name: string; images: Array<{ url: string }> } }> } };
+    const track = data.tracks?.items?.[0];
+    if (!track) return undefined;
+    const match = { uri: track.uri, title: track.name, artist: track.artists.map((artist) => artist.name).join(", "), album: track.album.name, imageUrl: track.album.images[0]?.url };
+    setSongs((items) => items.map((item) => item.id === song.id ? { ...item, spotify: match, status: "Matched" } : item));
+    return match;
+  }, [spotify]);
+
+  useEffect(() => {
+    if (!spotify || !currentSong || currentSong.spotify) return;
+    const timer = window.setTimeout(() => { void matchSong(currentSong); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [spotify, currentSong, matchSong]);
+
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
       if (event.metaKey || event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
-      if (event.key === " ") { event.preventDefault(); setIsPlaying((playing) => !playing); }
+      if (event.key === " ") { event.preventDefault(); void playOrPause(); }
       if (event.key.toLowerCase() === "y") vote("yes");
       if (event.key.toLowerCase() === "n") vote("no");
       if (event.key === "ArrowLeft") {
@@ -117,6 +215,27 @@ export default function Home() {
     const next = songs.find((song) => !votes[song.id]?.[nextPerson]);
     if (next) setCurrentId(next.id);
     else setNotice(`${nextPerson} has reviewed the whole list. You can still change any choice from the shortlist.`);
+  }
+
+  async function connectSpotify() {
+    const verifier = randomString(64);
+    const state = randomString(24);
+    const challenge = await codeChallenge(verifier);
+    sessionStorage.setItem("spotify-verifier", verifier);
+    sessionStorage.setItem("spotify-state", state);
+    const params = new URLSearchParams({ client_id: spotifyClientId, response_type: "code", redirect_uri: window.location.origin, code_challenge_method: "S256", code_challenge: challenge, state, scope: "streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state" });
+    window.location.assign(`https://accounts.spotify.com/authorize?${params}`);
+  }
+
+  async function playOrPause() {
+    if (!spotify) { await connectSpotify(); return; }
+    if (isPlaying) { await playerRef.current?.togglePlay(); setIsPlaying(false); return; }
+    if (!deviceId) { setNotice("Spotify is connecting to this browser. Give it a moment, then press play again."); return; }
+    const match = await matchSong(currentSong);
+    if (!match) { setNotice("We couldn’t find this version on Spotify. Try Open in Spotify instead."); return; }
+    const response = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, { method: "PUT", headers: { Authorization: `Bearer ${spotify.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ uris: [match.uri] }) });
+    if (!response.ok) { setNotice("Spotify couldn’t start this song. Try reconnecting Spotify or Open in Spotify."); return; }
+    setIsPlaying(true);
   }
 
   function vote(value: VoteValue) {
@@ -170,6 +289,7 @@ export default function Home() {
           <button className={screen === "review" ? "nav-active" : ""} onClick={() => setScreen("review")}>Review</button>
           <button className={screen === "results" ? "nav-active" : ""} onClick={() => setScreen("results")}>Shortlist <span>{resultGroups["Both yes"]?.length ?? 0}</span></button>
         </nav>
+        <button className={`spotify-button ${spotify ? "spotify-connected" : ""}`} onClick={() => void connectSpotify()}>{spotify ? "Spotify connected" : "Connect Spotify"}</button>
         <label className="person-switch">Reviewing as
           <select value={person} onChange={(event) => switchPerson(event.target.value as Person)}>
             {people.map((name) => <option key={name}>{name}</option>)}
@@ -194,13 +314,13 @@ export default function Home() {
           </aside>
 
           <article className="song-card">
-            <div className="song-meta"><span className={`status ${currentSong.status.toLowerCase().replace(" ", "-")}`}>{currentSong.status}</span><span>{currentSong.album}</span></div>
-            <div className="album-art" style={{ "--art": currentSong.colour } as React.CSSProperties}><span>{currentSong.title.split(" ").slice(0, 2).join("\n")}</span><b>{currentSong.artist}</b></div>
-            <p className="artist-name">{currentSong.artist}</p>
-            <h2>{currentSong.title}</h2>
+            <div className="song-meta"><span className={`status ${currentSong.status.toLowerCase().replace(" ", "-")}`}>{currentSong.spotify ? "Spotify matched" : currentSong.status}</span><span>{currentSong.spotify?.album ?? currentSong.album}</span></div>
+            <div className={`album-art ${currentSong.spotify?.imageUrl ? "has-cover" : ""}`} style={{ "--art": currentSong.colour } as CSSProperties}>{currentSong.spotify?.imageUrl ? <img src={currentSong.spotify.imageUrl} alt={`Album cover for ${currentSong.spotify.album}`} /> : <><span>{currentSong.title.split(" ").slice(0, 2).join("\n")}</span><b>{currentSong.artist}</b></>}</div>
+            <p className="artist-name">{currentSong.spotify?.artist ?? currentSong.artist}</p>
+            <h2>{currentSong.spotify?.title ?? currentSong.title}</h2>
             <div className="playback">
-              <button className="round-button" onClick={() => setIsPlaying(!isPlaying)} aria-label={isPlaying ? "Pause preview" : "Play preview"}>{isPlaying ? "Ⅱ" : "▶"}</button>
-              <div><strong>{isPlaying ? "Playing preview" : "Ready to listen"}</strong><span>Spotify opens if playback isn’t connected</span></div>
+              <button className="round-button" onClick={() => void playOrPause()} aria-label={!spotify ? "Connect Spotify" : isPlaying ? "Pause song" : "Play song"}>{isPlaying ? "Ⅱ" : "▶"}</button>
+              <div><strong>{!spotify ? "Connect Spotify to listen" : deviceId ? isPlaying ? "Playing in this browser" : "Ready to listen" : "Connecting Spotify player"}</strong><span>{currentSong.spotify?.imageUrl ? "Real Spotify match" : "Album art appears as soon as Spotify matches it"}</span></div>
               <a href={`https://open.spotify.com/search/${encodeURIComponent(`${currentSong.artist} ${currentSong.title}`)}`} target="_blank" rel="noreferrer">Open in Spotify ↗</a>
             </div>
             <div className="choice-row">
@@ -214,7 +334,7 @@ export default function Home() {
         <section className="results-page">
           <div className="results-heading"><div><p className="eyebrow">WEDDING SETLIST</p><h1>Your shared <em>shortlist.</em></h1><p>{resultGroups["Both yes"]?.length ?? 0} songs you both chose. Keep the little sparks.</p></div><button className="export-button" onClick={exportResults}>Export CSV ↓</button></div>
           <div className="filter-row">{["All songs", "Both yes", "Different picks", "Both no", "Awaiting vote"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item} <span>{item === "All songs" ? songs.length : resultGroups[item]?.length ?? 0}</span></button>)}</div>
-          <div className="results-list">{songs.filter((song) => filter === "All songs" || classify(song, votes) === filter).map((song) => <article className="result-row" key={song.id}><div className="mini-art" style={{ background: song.colour }}>{song.title.slice(0, 1)}</div><div className="result-song"><strong>{song.title}</strong><span>{song.artist}</span></div><div className="vote-state"><span>Alex <b className={votes[song.id]?.Alex}>{votes[song.id]?.Alex ?? "—"}</b></span><span>Jamie <b className={votes[song.id]?.Jamie}>{votes[song.id]?.Jamie ?? "—"}</b></span></div><span className={`outcome ${slug(classify(song, votes))}`}>{classify(song, votes)}</span><button className="edit-button" onClick={() => { setCurrentId(song.id); setScreen("review"); }}>Review</button></article>)}</div>
+          <div className="results-list">{songs.filter((song) => filter === "All songs" || classify(song, votes) === filter).map((song) => <article className="result-row" key={song.id}>{song.spotify?.imageUrl ? <img className="mini-art cover" src={song.spotify.imageUrl} alt="" /> : <div className="mini-art" style={{ background: song.colour }}>{song.title.slice(0, 1)}</div>}<div className="result-song"><strong>{song.spotify?.title ?? song.title}</strong><span>{song.spotify?.artist ?? song.artist}</span></div><div className="vote-state"><span>Alex <b className={votes[song.id]?.Alex}>{votes[song.id]?.Alex ?? "—"}</b></span><span>Jamie <b className={votes[song.id]?.Jamie}>{votes[song.id]?.Jamie ?? "—"}</b></span></div><span className={`outcome ${slug(classify(song, votes))}`}>{classify(song, votes)}</span><button className="edit-button" onClick={() => { setCurrentId(song.id); setScreen("review"); }}>Review</button></article>)}</div>
         </section>
       )}
     </main>
